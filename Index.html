@@ -1,0 +1,106 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>Pass the Stats</title>
+<style>
+:root{--bg:#0c1424;--p:#142139;--in:#18263c;--bd:#43536b;--tx:#f3f6fb;--mu:#b7c7d9;--ac:#69e4ad}
+*{box-sizing:border-box}body{padding-top:calc(16px + env(safe-area-inset-top,0px))!important;padding-bottom:calc(16px + env(safe-area-inset-bottom,0px))!important;color-scheme:dark;font-family:system-ui,sans-serif;background:var(--bg);color:var(--tx);margin:0;padding:16px}main{max-width:900px;margin:auto}
+h1{color:var(--ac);margin:4px 0}h2{font-size:1.1rem}textarea,input,select,button{width:100%;padding:11px;border-radius:9px;border:1px solid var(--bd);background:var(--in);color:var(--tx);font:inherit;margin:5px 0 12px}
+button{background:var(--ac);color:var(--bg);font-weight:700;cursor:pointer}nav{display:flex;gap:6px;overflow-x:auto;margin:10px 0}nav button{width:auto;margin:0;white-space:nowrap;background:var(--in);color:var(--tx)}nav button.on{background:var(--ac);color:var(--bg)}
+.panel{background:var(--p);padding:16px;border-radius:14px;margin:12px 0}.row{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:0 12px}
+.scroll{overflow-x:auto}table{width:100%;border-collapse:collapse;font-size:.92rem}td,th{padding:8px;text-align:left;border-bottom:1px solid var(--bd);white-space:nowrap}td input{width:70px;margin:0;padding:6px}tr.sel{background:#1d3150}tbody tr{cursor:pointer}
+small,.mu{color:var(--mu)}.banner{background:#3a2d12;border:1px solid #c9962b;padding:10px;border-radius:10px;font-size:.9rem}.done{color:var(--ac)}.dev{color:#f5b74a}svg{width:100%;height:auto}
+</style></head><body><main>
+<h1>🏀 Pass the Stats</h1><p class="mu">NBA last-10-game analytics &amp; over/under estimates</p>
+<div id="banner" class="banner"></div>
+<nav id="tabs"></nav>
+<section id="t-dash"><div class="panel"><div class="row">
+<label>Search player<input id="q" list="plist" placeholder="Type a name…" autocomplete="off"></label>
+<label>Team<select id="team"></select></label>
+<label>Player<select id="player"></select></label>
+<label>Next opponent<select id="opp"></select></label></div>
+<div id="dashhead"></div><div class="scroll"><table><thead><tr><th>Category</th><th>L10 avg</th><th>Projection</th><th>Line</th><th>Over</th><th>Under</th></tr></thead><tbody id="rows"></tbody></table></div>
+<small>Tap a row for the chart. Lines default to the L10 median (to .5); edit them to match a sportsbook line.</small></div>
+<div class="panel"><h2 id="ctitle">Chart</h2><div id="chart"></div><small>Bars: every logged game (bright = last 10). Dashed line: the line used above.</small></div></section>
+<datalist id="plist"></datalist>
+<section id="t-calc" hidden><div class="panel"><h2>Manual calculator (original prototype)</h2>
+<label>Player name<input id="cplayer" placeholder="Enter player name"></label><label>Category<select id="ccat"></select></label>
+<label>Last 10 game values (comma separated)<textarea id="cvals" rows="3" placeholder="25,30,28,22,26,31,27,29,24,33"></textarea></label>
+<button id="ccalc">Calculate next-game estimate</button><p id="cerr" role="alert"></p></div><div id="cout" class="panel" hidden></div></section>
+<section id="t-acc" hidden><div class="panel"><h2>Prediction accuracy (walk-forward backtest)</h2>
+<label>Category<select id="acat"></select></label><div id="accout"></div></div></section>
+<section id="t-status" hidden><div class="panel" id="statusout"></div></section>
+<small>Estimates are statistical, not guarantees. Not betting advice.</small>
+</main>
+<script id="core">
+const CATS=[['pts','Points'],['reb','Rebounds'],['fgm','Field goals made'],['ast','Assists'],['tov','Turnovers'],['dreb','Defensive rebounds'],['oreb','Offensive rebounds'],['blk','Blocks'],['stl','Steals'],['fg3m','3-pointers made'],['ftm','Free throws made'],['fg3p','3PT %'],['fgp','FG %'],['ftp','FT %'],['pf','Personal fouls']];
+const isPct=k=>/p$/.test(k)&&k!=='pts';
+const mean=a=>a.reduce((x,y)=>x+y,0)/a.length;
+const median=a=>{const s=[...a].sort((x,y)=>x-y),n=s.length;return n%2?s[(n-1)/2]:(s[n/2-1]+s[n/2])/2};
+const sd=a=>{const m=mean(a);return Math.sqrt(a.reduce((s,x)=>s+(x-m)**2,0)/(a.length-1))};
+function erf(x){const t=1/(1+0.3275911*Math.abs(x)),y=1-(((((1.061405429*t-1.453152027)*t)+1.421413741)*t-0.284496736)*t+0.254829592)*t*Math.exp(-x*x);return x>=0?y:-y}
+const ncdf=z=>0.5*(1+erf(z/Math.SQRT2));
+const defLine=v=>Math.floor(median(v.slice(-10)))+0.5;
+// Projection: recency-weighted L10 mean blended with season-to-date mean, scaled by opponent factor (counting stats only).
+function project(hist,k,oppF=1){const l=hist.slice(-10),w=l.map((_,i)=>Math.pow(0.85,l.length-1-i)),ew=l.reduce((s,x,i)=>s+x*w[i],0)/w.reduce((a,b)=>a+b,0);
+ let mu=hist.length>10?0.5*ew+0.5*mean(hist):ew;if(!isPct(k))mu*=oppF;
+ const s=Math.max(sd(l)*Math.sqrt(1+1/l.length),isPct(k)?1:0.5);return{mu,s}}
+// P(over) for half-point line; normal approximation. P(under)=1-P(over).
+const pOver=(mu,s,line)=>Math.min(0.99,Math.max(0.01,1-ncdf((line-mu)/s)));
+function backtest(players,k){const bins=Array.from({length:10},()=>({n:0,p:0,y:0}));let n=0,br=0,base=0,hit=0;
+ for(const p of players){const v=p.logs.map(g=>g[k]);for(let i=10;i<v.length;i++){const h=v.slice(0,i),line=defLine(h),{mu,s}=project(h,k),po=pOver(mu,s,line),y=v[i]>line?1:0;
+  const b=bins[Math.min(9,Math.floor(po*10))];b.n++;b.p+=po;b.y+=y;n++;br+=(po-y)**2;base+=(0.5-y)**2;hit+=((po>=.5)===(y===1))?1:0}}
+ return{n,brier:br/n,baseline:base/n,acc:hit/n,bins}}
+// Seeded SAMPLE data generator (synthetic; not real NBA data).
+function rng(a){return()=>{a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+function makeSample(){const R=rng(42),g=()=>{let u=0;for(let i=0;i<6;i++)u+=R();return(u-3)*Math.SQRT2};
+ const names='Atlanta Hawks|Boston Celtics|Brooklyn Nets|Charlotte Hornets|Chicago Bulls|Cleveland Cavaliers|Dallas Mavericks|Denver Nuggets|Detroit Pistons|Golden State Warriors|Houston Rockets|Indiana Pacers|LA Clippers|Los Angeles Lakers|Memphis Grizzlies|Miami Heat|Milwaukee Bucks|Minnesota Timberwolves|New Orleans Pelicans|New York Knicks|Oklahoma City Thunder|Orlando Magic|Philadelphia 76ers|Phoenix Suns|Portland Trail Blazers|Sacramento Kings|San Antonio Spurs|Toronto Raptors|Utah Jazz|Washington Wizards'.split('|');
+ const teams=names.map((n,i)=>({id:'T'+i,name:n,oppFactor:+(0.94+R()*0.12).toFixed(3)}));
+ const roles=[{r:'Guard',m:{pts:18,reb:3,fgm:6.5,ast:6,tov:2.8,dreb:2.5,oreb:.6,blk:.3,stl:1.2,fg3m:2.4,ftm:3,fg3p:37,fgp:45,ftp:82,pf:2.2}},{r:'Wing',m:{pts:15,reb:5,fgm:5.5,ast:3,tov:1.8,dreb:4,oreb:1,blk:.6,stl:1,fg3m:1.8,ftm:2.5,fg3p:36,fgp:46,ftp:78,pf:2.3}},{r:'Big',m:{pts:13,reb:9,fgm:5.2,ast:2,tov:1.9,dreb:6.8,oreb:2.4,blk:1.5,stl:.7,fg3m:.4,ftm:2.6,fg3p:30,fgp:55,ftp:68,pf:2.9}}];
+ const players=[];teams.forEach((t,ti)=>roles.forEach((ro,ri)=>{const sc=0.8+R()*0.6,logs=[];
+  for(let d=0;d<40;d++){const o=teams[(ti+1+Math.floor(R()*29))%30],gm={d:'G'+(d+1),opp:o.id};
+   for(const[k]of CATS){const m=ro.m[k]*(isPct(k)?1:sc),v=isPct(k)?Math.min(100,Math.max(0,m+g()*12)):Math.max(0,Math.round(m+g()*(Math.sqrt(m)*.9+.5)));gm[k]=isPct(k)?+v.toFixed(1):v}
+   logs.push(gm)}players.push({id:'P'+players.length,name:`Sample ${ro.r} ${ti+1}`,team:t.id,logs})}));
+ return{source:'sample',teams,players}}
+if(typeof module!=='undefined')module.exports={CATS,mean,median,sd,ncdf,project,pOver,defLine,backtest,makeSample,isPct};
+</script>
+<script id="ui">
+if(typeof document!=='undefined'){(async()=>{
+const $=s=>document.querySelector(s),esc=s=>String(s).replace(/[<>&"']/g,'');
+let D;try{const r=await fetch('data/nba.json');if(!r.ok)throw 0;D=await r.json()}catch(e){D=makeSample()}
+const live=D.source!=='sample';
+$('#banner').innerHTML=live?`Live data${D.updated?' · updated '+esc(D.updated):''}`:'⚠ <b>SAMPLE DATA</b> — synthetic players and stats for demonstration only. Run the data script and deploy <code>data/nba.json</code> to show real NBA data.';
+const T={};D.teams.forEach(t=>T[t.id]=t);let cur=null,curCat='pts',lines={};
+const tabs=[['dash','Dashboard'],['calc','Calculator'],['acc','Accuracy'],['status','Status']];
+$('#tabs').innerHTML=tabs.map(t=>`<button data-t="${t[0]}">${t[1]}</button>`).join('');
+const show=n=>{tabs.forEach(t=>{$('#t-'+t[0]).hidden=t[0]!==n;document.querySelector(`[data-t=${t[0]}]`).classList.toggle('on',t[0]===n)});if(n==='acc')renderAcc()};
+$('#tabs').onclick=e=>e.target.dataset.t&&show(e.target.dataset.t);
+$('#team').innerHTML='<option value="">All teams</option>'+D.teams.map(t=>`<option value="${t.id}">${esc(t.name)}</option>`).join('');
+$('#opp').innerHTML='<option value="">No opponent adjustment</option>'+D.teams.map(t=>`<option value="${t.id}">${esc(t.name)}</option>`).join('');
+$('#plist').innerHTML=D.players.map(p=>`<option value="${esc(p.name)}">`).join('');
+function fillPlayers(){const tm=$('#team').value,q=$('#q').value.toLowerCase(),l=D.players.filter(p=>(!tm||p.team===tm)&&(!q||p.name.toLowerCase().includes(q)));
+ $('#player').innerHTML=l.map(p=>`<option value="${p.id}">${esc(p.name)} (${esc(T[p.team].abbr||T[p.team].name)})</option>`).join('');pick()}
+function pick(){cur=D.players.find(p=>p.id===$('#player').value)||null;lines={};render()}
+$('#team').onchange=fillPlayers;$('#q').oninput=fillPlayers;$('#player').onchange=pick;$('#opp').onchange=render;
+function render(){if(!cur){$('#rows').innerHTML='';$('#dashhead').innerHTML='<p>No matching player.</p>';return}
+ const of=$('#opp').value?T[$('#opp').value].oppFactor:1;
+ $('#dashhead').innerHTML=`<h2>${esc(cur.name)} · ${esc(T[cur.team].name)} <small>(${cur.logs.length} games logged)</small></h2>`;
+ $('#rows').innerHTML=CATS.map(([k,n])=>{const v=cur.logs.map(g=>g[k]),{mu,s}=project(v,k,of),L=lines[k]??defLine(v),po=pOver(mu,s,L);
+  return`<tr data-k="${k}" class="${k===curCat?'sel':''}"><td>${n}</td><td>${mean(v.slice(-10)).toFixed(1)}</td><td>${mu.toFixed(1)}</td><td><input type="number" step="0.5" value="${L}" data-k="${k}"></td><td>${(po*100).toFixed(0)}%</td><td>${((1-po)*100).toFixed(0)}%</td></tr>`}).join('');
+ chart()}
+$('#rows').onclick=e=>{if(e.target.tagName==='INPUT')return;const r=e.target.closest('tr');if(r){curCat=r.dataset.k;render()}};
+$('#rows').onchange=e=>{if(e.target.tagName==='INPUT'){const x=parseFloat(e.target.value);if(isFinite(x))lines[e.target.dataset.k]=x;render()}};
+function chart(){const k=curCat,v=cur.logs.map(g=>g[k]),L=lines[k]??defLine(v),mx=Math.max(...v,L)*1.1||1,W=640,H=220,bw=W/v.length;
+ $('#ctitle').textContent=CATS.find(c=>c[0]===k)[1]+' — game history';
+ $('#chart').innerHTML=`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Bar chart of game history">`+v.map((x,i)=>`<rect x="${i*bw+1}" y="${H-x/mx*H}" width="${bw-2}" height="${x/mx*H}" fill="${i>=v.length-10?'#69e4ad':'#3b5b78'}"/>`).join('')+`<line x1="0" x2="${W}" y1="${H-L/mx*H}" y2="${H-L/mx*H}" stroke="#f5b74a" stroke-dasharray="6 4"/></svg>`}
+// Original calculator, preserved
+CATS.forEach(([k,n])=>{$('#ccat').add(new Option(n,n));$('#acat').add(new Option(n,k))});
+$('#ccalc').onclick=()=>{const er=$('#cerr'),out=$('#cout');er.textContent='';out.hidden=true;const a=$('#cvals').value.split(/[\s,;]+/).filter(Boolean).map(Number);
+ if(a.length!==10||a.some(x=>!Number.isFinite(x)||x<0)){er.textContent='Enter exactly 10 valid nonnegative numbers.';return}
+ if($('#ccat').value.includes('%')&&a.some(x=>x>100)){er.textContent='Percentages must be between 0 and 100.';return}
+ const md=median(a),m=mean(a),s=sd(a),o=a.filter(x=>x>md).length,u=a.filter(x=>x<md).length,t=10-o-u,f=x=>x.toFixed(1),p=n=>f(100*(n+0.5)/11.5);
+ out.hidden=false;out.innerHTML=`<h2>${esc($('#cplayer').value)||'Player'} — ${esc($('#ccat').value)}</h2><table><tr><th>Last 10 mean</th><td>${f(m)}</td></tr><tr><th>Last 10 median</th><td>${f(md)}</td></tr><tr><th>Sample standard deviation</th><td>${f(s)}</td></tr><tr><th>Games over / under / equal</th><td>${o} / ${u} / ${t}</td></tr><tr><th>Estimated over median</th><td>${p(o)}%</td></tr><tr><th>Estimated under median</th><td>${p(u)}%</td></tr><tr><th>Estimated equal median</th><td>${p(t)}%</td></tr></table><p><small>Smoothed descriptive estimates only; not calibrated predictions.</small></p>`};
+function renderAcc(){const k=$('#acat').value,r=backtest(D.players,k);
+ $('#accout').innerHTML=`<p>${r.n.toLocaleString()} out-of-sample predictions · directional accuracy <b>${(r.acc*100).toFixed(1)}%</b> · Brier <b>${r.brier.toFixed(3)}</b> (coin-flip baseline ${r.baseline.toFixed(3)}; lower is better)</p><div class="scroll"><table><tr><th>Predicted P(over)</th><th>Games</th><th>Avg predicted</th><th>Actual over rate</th></tr>${r.bins.map((b,i)=>b.n?`<tr><td>${i*10}–${i*10+10}%</td><td>${b.n}</td><td>${(b.p/b.n*100).toFixed(0)}%</td><td>${(b.y/b.n*100).toFixed(0)}%</td></tr>`:'').join('')}</table></div><small>Each game is predicted using only earlier games. ${live?'':'On SAMPLE data this only tests the code, not real-world accuracy. '}Live prediction logging across days is in development.</small>`}
+$('#acat').onchange=renderAcc;
+$('#statusout').innerHTML=`<h2>Feature status</h2><p class="done"><b>Complete &amp; tested (on sample data)</b></p><ul><li>Mobile layout, player search, team filter, player picker</li><li>15-category L10 averages, projections, editable lines, over/under %</li><li>Opponent adjustment (counting stats)</li><li>Game-history charts</li><li>Original manual calculator</li><li>Walk-forward accuracy backtest</li></ul><p class="dev"><b>Written but untested against real data</b></p><ul><li><code>fetch_data.py</code> ingestion script (needs network + nba_api)</li></ul><p class="dev"><b>In development / not built</b></p><ul><li>Verified real rosters of all active players</li><li>Automatic scheduled updates (needs host scheduler)</li><li>Real opponent-defense ratings, injuries, minutes, home/away</li><li>Probability calibration on real historical data</li><li>Saved live prediction-vs-result tracking</li><li>Accounts, payments</li></ul>`;
+fillPlayers();show('dash');
+})()}
+</script></body></html>
